@@ -12,7 +12,10 @@ description: >-
   "what is breaking out", "opening range breakouts", "scan for bull flags",
   "oversold stocks", "pre-market scan", "build my watchlist", "what should I
   look at today", or at the start of a trading day before /trader-news.
-argument-hint: "[universe | daily | orb] [--at HH:MM]"
+  Also scans the Philippine Stock Exchange (daily setups from PSE Edge,
+  --market ph) when the user says "scan the PSE", "Philippine stocks" or
+  "PH market".
+argument-hint: "[universe | daily | orb] [--market ph] [--at HH:MM]"
 ---
 
 # trader-scanner
@@ -49,6 +52,32 @@ reason is one plain line).
 | `trader/universe.txt` | written by `universe`: one `SYMBOL\|Name` a line, read by `daily` and `orb` |
 | `trader/watchlist.json` | written by `daily` and `orb`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `hits[]`. trader-news and trader-entry read `hits[].symbol` |
 | `trader/config.json` | read by `orb`: `no_entries_after` (default 15:30) |
+| `trader/universe-ph.txt` | written by `universe --market ph`: one `SYMBOL\|Name\|cmpy_id\|security_id` a line (PSE Edge ids) |
+| `trader/watchlist-ph.json` | written by `daily --market ph`: same shape, plus `market: ph` and `currency: PHP` |
+
+## The Philippine market (`--market ph`)
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scan.py" universe --market ph   # PSE Edge directory -> trader/universe-ph.txt
+python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --market ph      # -> trader/watchlist-ph.json
+```
+
+- Source: PSE Edge (edge.pse.com.ph), the exchange's own site. Free, no key.
+  Yahoo has no PSE data (`JFC.PS` answers "No data found").
+- `universe` reads the company directory: 284 companies on Oct 29 2026, in
+  about 3 seconds. PH tickers go in their own file because some match US
+  tickers (`AB`, `SM`).
+- `daily` fetches about 120 days of daily bars, one request a company, and
+  runs the same five setups. 284 companies took 2 min 49 s on Oct 29 2026;
+  28 had no bars (suspended or no trades). Prices are in pesos.
+- Floors: `--min-price 1` and `--min-value 10000000` (pesos traded on the
+  last session). PSE Edge gives pesos traded, not shares, so the hit's
+  `volume` is value / close, an estimate.
+- Today's bar counts only after 3:30 PM Manila, and only once PSE Edge posts
+  it. At 4:15 PM on Oct 29 2026 it had not yet: run it in the evening or the
+  next morning before the 9:30 AM open.
+- No `orb`: PSE Edge has no 5-minute bars. The other trader skills (news,
+  entry, alerts, broker) are US only.
 
 ## The universe
 

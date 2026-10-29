@@ -642,5 +642,39 @@ class Cli(unittest.TestCase):
         self.assertEqual(out["note"], "A scan is a list of charts that match a rule, not a list of stocks to buy.")
 
 
+PSE = os.path.join(SDIR, "pse")  # real PSE Edge directory pages and 10 daily charts, fetched Oct 29 2026
+
+
+class Philippines(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_universe_then_daily(self):
+        u = os.path.join(self.tmp, "u.txt")
+        code, out, _ = run(["universe", "--market", "ph", "--offline", os.path.join(PSE, "directory"), "--out", u])
+        self.assertEqual(code, 0, out)
+        self.assertIn("284 listed companies", out)
+        self.assertEqual(scan.pse_ids(u)["JFC"], ("86", "158"))
+        w = os.path.join(self.tmp, "w.json")
+        charts = os.path.join(PSE, "charts-2026-10-28.json.gz")
+        code, out, _ = run(["daily", "--market", "ph", "--offline", charts, "--now", "2026-10-28T08:00:00Z",
+                            "--out", w])
+        self.assertEqual(code, 0, out)
+        with open(w, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        self.assertEqual((doc["market"], doc["currency"], doc["as_of"]), ("ph", "PHP", "2026-10-28 close"))
+        self.assertEqual([h["symbol"] for h in doc["hits"]], ["AC", "URC"])  # AB is under PHP 10M traded
+
+    def test_todays_bar_waits_for_the_close(self):
+        doc = {"chartData": [{"CLOSE": 10.0, "VALUE": 100.0, "CHART_DATE": "Oct 27, 2026 00:00:00"},
+                             {"CLOSE": 11.0, "VALUE": 110.0, "CHART_DATE": "Oct 28, 2026 00:00:00"}]}
+        early = scan.parse_pse_chart(doc, DT(2026, 10, 28, 7, 29))   # 3:29 PM Manila
+        late = scan.parse_pse_chart(doc, DT(2026, 10, 28, 7, 30))
+        self.assertEqual(early["d"], [D(2026, 10, 27)])
+        self.assertEqual(late["c"], [10.0, 11.0])
+        self.assertEqual(late["meta"]["regularMarketVolume"], 10)
+
+
 if __name__ == "__main__":
     unittest.main()

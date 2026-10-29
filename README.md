@@ -152,6 +152,36 @@ for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
 real XBRL facts. They reproduce every number in the example above.
 
+## Philippine stocks (PSE)
+
+The scanner also scans the Philippine Stock Exchange, with free daily bars
+from PSE Edge (edge.pse.com.ph). Yahoo has no PSE data.
+
+```bash
+python3 trader-scanner/scan.py universe --market ph                    # the PH list, about weekly (3 s)
+python3 trader-scanner/scan.py daily --market ph                       # setups -> trader/watchlist-ph.json (~3 min)
+python3 trader-scanner/scan.py daily --market ph --symbols JFC,SM,BDO  # a few names only
+```
+
+The PH list is `trader/universe-ph.txt`: every listed company (284 on
+October 29 2026), one a line, with PSE Edge's ids, which the scan needs to
+fetch prices:
+
+```
+SYMBOL|Name|cmpy_id|security_id
+JFC|Jollibee Foods Corporation|86|158
+```
+
+- It is its own file because some PH tickers are also US tickers (`AB`, `SM`).
+- Run `daily` in the evening (Manila) or before the 9:30 AM open. PSE Edge
+  posts the day's bar late: at 4:15 PM on October 29 2026 it was not there yet.
+- Floors: `--min-price 1` and `--min-value 10000000` (pesos traded on the last
+  session). Lower `--min-value` to scan more names.
+- Prices are in pesos. A hit's `volume` is value / close, an estimate, since
+  PSE Edge gives pesos traded, not shares.
+- Daily setups only: no `orb` (no free 5-minute bars). The other skills
+  (news, entry, alerts, broker) are US only.
+
 ## Fine print
 
 **Not financial advice.** This is software that reads public data and does

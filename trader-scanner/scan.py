@@ -7,6 +7,18 @@
     python3 scan.py orb                               # after 9:50 AM ET: opening-range breakouts so far
     python3 scan.py orb --at 10:15 --or-minutes 15    # cut the clock at 10:15 AM ET
     python3 scan.py orb --offline wall5m.json.gz --now "2026-10-19 10:15" --min-price 0
+    python3 scan.py universe --market ph              # PSE Edge directory -> trader/universe-ph.txt
+    python3 scan.py daily --market ph                 # after 3:30 PM Manila -> trader/watchlist-ph.json
+
+--market ph  The Philippine Stock Exchange, from PSE Edge (edge.pse.com.ph),
+          free. universe reads the company directory (about 284 companies)
+          and keeps each one's PSE Edge ids. daily fetches about 120 days of
+          daily bars, one request a company, and runs the same setups.
+          Floors: --min-price 1 and --min-value 10,000,000 (pesos traded on
+          the last session). PSE Edge gives pesos traded, not shares, so
+          volume is value / close. Today's bar counts after 3:30 PM Manila,
+          once PSE Edge posts it (not yet at 4:15 PM on Oct 29 2026).
+          No orb: PSE Edge has no 5-minute bars.
 
 universe  Downloads Nasdaq Trader's symbol directories (nasdaqlisted.txt and
           otherlisted.txt) and keeps US-listed common stocks, ordinary shares
@@ -71,6 +83,7 @@ Exit code 0 when the scan found something, 1 when it did not or could not run.
 import argparse
 import datetime
 import gzip
+import html
 import json
 import os
 import re
@@ -480,6 +493,107 @@ def build_universe(texts):
     return sorted(kept.items()), counts, created
 
 
+# ---------------------------------------------------------------- Philippines (PSE Edge)
+
+PSE_URL = "https://edge.pse.com.ph"
+PH_UNIVERSE = "trader/universe-ph.txt"
+PH_WATCHLIST = "trader/watchlist-ph.json"
+MANILA = datetime.timedelta(hours=8)  # Manila is UTC+8 all year, no DST
+PH_DONE = datetime.time(15, 30)       # the PSE day is over (closing auction ends near 3:00 PM)
+PH_DAYS = 120                         # calendar days of daily bars to fetch: about 80 sessions
+PH_MAX_PAGES = 50
+PSE_ROW = re.compile(r"cmDetail\('(\d+)','(\d+)'\);return false;\">([^<]+)</a></td>\s*"
+                     r"<td class=\"alignC\"><a [^>]*>([^<]+)</a>")
+
+
+def pse_post(path, body, ctype="application/x-www-form-urlencoded"):
+    req = urllib.request.Request(PSE_URL + path, data=body.encode("utf-8"),
+                                 headers={"User-Agent": UA, "Content-Type": ctype, "Accept": "*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        raise ScanError("PSE Edge answered HTTP %d for %s" % (e.code, path))
+    except (urllib.error.URLError, OSError) as e:
+        raise ScanError("could not reach PSE Edge: %s" % getattr(e, "reason", e))
+
+
+def parse_pse_directory(text):
+    """One PSE Edge company directory page -> ([(SYM, name, cmpy_id, security_id)], total listed)."""
+    m = re.search(r"\[Total (\d+)\]", text)
+    if not m:
+        raise ScanError("not a PSE Edge company directory page")
+    rows = [(sym.strip().upper(), " ".join(html.unescape(name).replace("|", "/").split()), c, s)
+            for c, s, name, sym in PSE_ROW.findall(text)]
+    return rows, int(m.group(1))
+
+
+def pse_ids(path):
+    """universe-ph.txt (SYM|Name|cmpy_id|security_id) -> {SYM: (cmpy_id, security_id)}."""
+    if not os.path.exists(path):
+        raise ScanError("no %s yet: run `scan.py universe --market ph` first" % path)
+    out = {}
+    with open(path, encoding="utf-8") as fh:
+        for ln in fh:
+            f = ln.strip().split("|")
+            if len(f) >= 4 and not f[0].startswith("#"):
+                out[f[0].upper()] = (f[2], f[3])
+    return out
+
+
+def parse_pse_chart(text_or_doc, now_utc):
+    """PSE Edge DisclosureCht answer -> a daily series {"d", "c", "meta"} of COMPLETE
+    sessions (today's bar is dropped until PH_DONE Manila time), or None."""
+    doc = json.loads(text_or_doc) if isinstance(text_or_doc, str) else text_or_doc
+    now = now_utc + MANILA
+    bars = {}
+    for b in (doc or {}).get("chartData") or []:
+        if b.get("CLOSE") is None or not b.get("CHART_DATE"):
+            continue
+        d = datetime.datetime.strptime(b["CHART_DATE"], "%b %d, %Y %H:%M:%S").date()
+        if d > now.date() or (d == now.date() and now.time() < PH_DONE):
+            continue
+        bars[d] = (float(b["CLOSE"]), float(b.get("VALUE") or 0))
+    if not bars:
+        return None
+    days = sorted(bars)
+    close, value = bars[days[-1]]
+    # ponytail: PSE Edge gives pesos traded, not shares, so volume is value / close (an estimate)
+    return {"d": days, "c": [bars[d][0] for d in days],
+            "meta": {"regularMarketPrice": close, "regularMarketVolume": int(value / close) if close else 0}}
+
+
+def ph_bars(series, now_utc):
+    return list(zip(series["d"], series["c"]))
+
+
+def fetch_pse(symbols, ids, now_utc, pause, a=None):
+    """One PSE Edge chart request a symbol. -> ({SYM: series}, {SYM: error})."""
+    data, failed = {}, {}
+    end = (now_utc + MANILA).date()
+    start = end - datetime.timedelta(days=PH_DAYS)
+    for k, sym in enumerate(symbols):
+        if sym not in ids:
+            failed[sym] = "not in the PH universe file"
+            continue
+        if k and pause:
+            SLEEP(pause)
+        body = json.dumps({"cmpy_id": ids[sym][0], "security_id": ids[sym][1],
+                           "startDate": start.strftime("%m-%d-%Y"), "endDate": end.strftime("%m-%d-%Y")})
+        try:
+            s = parse_pse_chart(pse_post("/common/DisclosureCht.ax", body, "application/json"), now_utc)
+        except (ScanError, ValueError) as e:
+            failed[sym] = str(e)
+            continue
+        if s:
+            data[sym] = s
+        else:
+            failed[sym] = "no data from PSE Edge"
+        if a is not None and (k + 1) % 50 == 0:
+            progress(a, "  PSE Edge %d of %d charts" % (k + 1, len(symbols)))
+    return data, failed
+
+
 # ---------------------------------------------------------------- daily setups
 
 def rsi(closes, n=14):
@@ -539,7 +653,7 @@ def find_setups(closes):
                   "run_pct": run * 100, "range5_pct": rng5 * 100}
 
 
-def scan_daily(data, symbols, now_utc, min_price, min_volume):
+def scan_daily(data, symbols, now_utc, min_price, min_volume, min_value=0.0, bars_of=daily_closes):
     """Pure. data = {SYM: series}. Returns (hits, counts, last_date)."""
     hits, dates = [], {}
     counts = {"requested": len(symbols), "fetched": 0, "illiquid": 0, "short": 0, "scanned": 0}
@@ -548,13 +662,14 @@ def scan_daily(data, symbols, now_utc, min_price, min_volume):
         if not s:
             continue
         counts["fetched"] += 1
-        bars = daily_closes(s, now_utc)
+        bars = bars_of(s, now_utc)
         meta = s.get("meta") or {}
         price = meta.get("regularMarketPrice")
         if price is None and bars:
             price = bars[-1][1]
         vol = meta.get("regularMarketVolume")
-        if price is None or price < min_price or (min_volume > 0 and (vol is None or vol < min_volume)):
+        if price is None or price < min_price or (min_volume > 0 and (vol is None or vol < min_volume)) \
+                or (min_value > 0 and price * (vol or 0) < min_value):
             counts["illiquid"] += 1
             continue
         if len(bars) < MIN_DAILY_BARS:
@@ -837,7 +952,57 @@ def money(x):
 
 # ---------------------------------------------------------------- commands
 
+def cmd_universe_ph(a):
+    t0 = time.time()
+    a.out = a.out or PH_UNIVERSE
+    if a.offline:
+        if not os.path.isdir(a.offline):
+            raise ScanError("--offline wants a folder of PSE Edge directory pages (.html)")
+        pages = [os.path.join(a.offline, f) for f in sorted(os.listdir(a.offline)) if f.endswith(".html")]
+        if not pages:
+            raise ScanError("no .html pages in %s" % a.offline)
+    else:
+        pages = range(1, PH_MAX_PAGES + 1)
+    kept, total = {}, 0
+    for k, page in enumerate(pages):
+        if a.offline:
+            with open(page, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        else:
+            if k and a.pause:
+                SLEEP(a.pause)
+            text = pse_post("/companyDirectory/search.ax", "pageNo=%d&companyId=&keyword=&sortType=&dateSortType="
+                            "DESC&cmpySortType=ASC&symbolSortType=ASC&sector=ALL&subsector=ALL" % page)
+        rows, total = parse_pse_directory(text)
+        new = [r for r in rows if r[0] not in kept]
+        for r in new:
+            kept[r[0]] = r
+        if not a.offline and (not new or len(kept) >= total):
+            break
+    kept = [kept[s] for s in sorted(kept)]
+    if not a.no_write:
+        d = os.path.dirname(a.out)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(a.out, "w", encoding="utf-8") as fh:
+            for sym, name, c, s in kept:
+                fh.write("%s|%s|%s|%s\n" % (sym, name, c, s))
+    if a.json:
+        print(json.dumps({"market": "ph", "count": len(kept), "listed": total,
+                          "out": None if a.no_write else a.out, "seconds": round(time.time() - t0, 1)}, indent=2))
+    else:
+        print("PSE Edge company directory: %d listed companies." % total)
+        print("Kept %d%s." % (len(kept), "" if len(kept) == total else
+                              " (PARTIAL: %d were not read)" % (total - len(kept))))
+        if not a.no_write:
+            print("Wrote %s (one SYMBOL|Name|cmpy_id|security_id a line)." % a.out)
+    return 0 if kept else 1
+
+
 def cmd_universe(a):
+    if a.market == "ph":
+        return cmd_universe_ph(a)
+    a.out = a.out or DEFAULT_UNIVERSE
     t0 = time.time()
     texts = {}
     for k, fname in enumerate(NASDAQ_FILES):
@@ -883,22 +1048,46 @@ def cmd_universe(a):
 def cmd_daily(a):
     t0 = time.time()
     now = parse_now(a.now)
+    ph = a.market == "ph"
+    a.out = a.out or (PH_WATCHLIST if ph else "trader/watchlist.json")
+    if a.min_price is None:
+        a.min_price = 1.0 if ph else 5.0
+    if a.min_volume is None:
+        a.min_volume = 0 if ph else 1000000
+    if a.min_value is None:
+        a.min_value = 10000000.0 if ph else 0.0
+    if ph and not a.offline:
+        a.universe = a.universe or PH_UNIVERSE
     offline_syms = None
-    if a.offline:
+    if a.offline and ph:
+        doc = json.loads(_read_maybe_gz(a.offline))
+        data = {k.upper(): parse_pse_chart(v, now) for k, v in doc.items()}
+        failed = {k: "no data" for k, v in data.items() if not v}
+        data = {k: v for k, v in data.items() if v}
+        offline_syms = sorted(set(data) | set(failed))
+    elif a.offline:
         data, failed = load_offline(a.offline)
         offline_syms = sorted(set(data) | set(failed))
     symbols = read_symbols(a, offline_syms)
-    if not a.offline:
+    if not a.offline and ph:
+        progress(a, "Fetching daily bars for %s PSE symbols from PSE Edge..." % "{:,}".format(len(symbols)))
+        data, failed = fetch_pse(symbols, pse_ids(a.universe), now, a.pause, a)
+    elif not a.offline:
         progress(a, "Fetching daily closes for %s symbols (%d spark requests)..."
                  % ("{:,}".format(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
         data, failed = fetch_spark(symbols, "3mo", "1d", a.pause, a)
-    hits, counts, last_date = scan_daily(data, symbols, now, a.min_price, a.min_volume)
+    hits, counts, last_date = scan_daily(data, symbols, now, a.min_price, a.min_volume, a.min_value,
+                                         ph_bars if ph else daily_closes)
     nfailed = len(symbols) - counts["fetched"]
     as_of = ("%s close" % last_date.isoformat()) if last_date else None
+    filters = {"min_price": a.min_price, "min_volume": a.min_volume}
+    if a.min_value:
+        filters["min_value"] = a.min_value
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "daily",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
-           "source": "yahoo", "filters": {"min_price": a.min_price, "min_volume": a.min_volume},
-           "note": NOTE, "hits": hits}
+           "source": "pse_edge" if ph else "yahoo", "filters": filters, "note": NOTE, "hits": hits}
+    if ph:
+        doc.update(market="ph", currency="PHP")
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
@@ -906,14 +1095,19 @@ def cmd_daily(a):
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
-    local = to_eastern(now)
-    print("Daily scan, %s ET, closes through %s (Yahoo spark, daily closes only)." % (
-        local.strftime("%a %Y-%m-%d %H:%M"), last_date.isoformat() if last_date else "nothing"))
-    print("Fetched %s of %s charts%s. %s passed the liquidity filter ($%s+ and %s+ shares)%s; "
+    cur = "PHP " if ph else "$"
+    if ph:
+        print("Daily scan (PSE), %s Manila, closes through %s (PSE Edge daily bars)." % (
+            (now + MANILA).strftime("%a %Y-%m-%d %H:%M"), last_date.isoformat() if last_date else "nothing"))
+        liquid = "%s%s+ and %s{:,.0f}+ traded".format(a.min_value) % (cur, _n(a.min_price), cur)
+    else:
+        print("Daily scan, %s ET, closes through %s (Yahoo spark, daily closes only)." % (
+            to_eastern(now).strftime("%a %Y-%m-%d %H:%M"), last_date.isoformat() if last_date else "nothing"))
+        liquid = "$%s+ and %s+ shares" % (_n(a.min_price), "{:,}".format(a.min_volume))
+    print("Fetched %s of %s charts%s. %s passed the liquidity filter (%s)%s; "
           "%s scanned." % ("{:,}".format(counts["fetched"]), "{:,}".format(len(symbols)),
                            (" (%s failed or had no data)" % "{:,}".format(nfailed)) if nfailed else "",
-                           "{:,}".format(counts["fetched"] - counts["illiquid"]), _n(a.min_price),
-                           "{:,}".format(a.min_volume),
+                           "{:,}".format(counts["fetched"] - counts["illiquid"]), liquid,
                            (", %d had under %d days" % (counts["short"], MIN_DAILY_BARS)) if counts["short"] else "",
                            "{:,}".format(counts["scanned"])))
     if hits:
@@ -924,13 +1118,14 @@ def cmd_daily(a):
     else:
         print("No setups.")
     for h in hits[:a.show]:
-        print("  %-6s %10s  RSI %5.1f  %s" % (h["symbol"], money(h["price"]), h["rsi"],
+        print("  %-6s %10s  RSI %5.1f  %s" % (h["symbol"], cur + _p(h["price"]), h["rsi"],
                                               ", ".join(LABEL[t] for t in h["setups"])))
     if len(hits) > a.show:
         print("  ... and %d more in the watchlist (--show N for more)." % (len(hits) - a.show))
     if not a.no_write:
         print("Wrote %s (mode daily, %d hit%s)." % (a.out, len(hits), "" if len(hits) == 1 else "s"))
-    print(NOTE + " Next: pick one chart, then /trader-news TICKER.")
+    print(NOTE + (" Next: pick one chart and read its disclosures on edge.pse.com.ph (the other trader"
+                  " skills are US only)." if ph else " Next: pick one chart, then /trader-news TICKER."))
     return 0 if hits else 1
 
 
@@ -957,6 +1152,7 @@ def cmd_orb(a):
                 explicit_day = max(days)
                 if at is None:
                     raise ScanError("offline replay: give --at HH:MM or --now \"YYYY-MM-DD HH:MM\"")
+    a.out = a.out or "trader/watchlist.json"
     day, cutoff = orb_window(now, at, a.or_minutes, until, explicit_day)
     symbols = read_symbols(a, offline_syms)
     confirm = None
@@ -1032,8 +1228,11 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
 
     p = sub.add_parser("universe", help="download Nasdaq Trader's lists -> trader/universe.txt")
-    p.add_argument("--out", default=DEFAULT_UNIVERSE)
-    p.add_argument("--offline", metavar="DIR", help="a folder with nasdaqlisted.txt and otherlisted.txt")
+    p.add_argument("--market", choices=("us", "ph"), default="us",
+                   help="us: Nasdaq Trader; ph: PSE Edge's company directory -> %s" % PH_UNIVERSE)
+    p.add_argument("--out", help="default %s (us) or %s (ph)" % (DEFAULT_UNIVERSE, PH_UNIVERSE))
+    p.add_argument("--offline", metavar="DIR",
+                   help="a folder with nasdaqlisted.txt and otherlisted.txt (ph: PSE Edge directory .html pages)")
     p.add_argument("--no-write", action="store_true")
     p.add_argument("--pause", type=float, default=PAUSE)
     p.add_argument("--json", action="store_true")
@@ -1048,7 +1247,7 @@ def main(argv=None):
         p.add_argument("--min-volume", type=int, default=min_volume)
         p.add_argument("--offline", metavar="PATH", help="fixture folder or file instead of the network")
         p.add_argument("--now", help='pretend it is this time ("2026-10-19 10:15" New York, or ...Z)')
-        p.add_argument("--out", default="trader/watchlist.json")
+        p.add_argument("--out", help="default trader/watchlist.json (ph: %s)" % PH_WATCHLIST)
         p.add_argument("--no-write", action="store_true")
         p.add_argument("--pause", type=float, default=PAUSE, help="seconds between requests (%.1f)" % PAUSE)
         p.add_argument("--show", type=int, default=50, help="hits to print (all are written)")
@@ -1056,7 +1255,11 @@ def main(argv=None):
         p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("daily", help="pre-market setups from daily closes")
-    common(p, 5.0, 1000000)
+    common(p, None, None)
+    p.add_argument("--market", choices=("us", "ph"), default="us",
+                   help="ph: Philippine Stock Exchange daily bars from PSE Edge, prices in pesos")
+    p.add_argument("--min-value", type=float,
+                   help="minimum traded value, price x volume (default 0; ph: 10,000,000 pesos)")
     p = sub.add_parser("orb", help="opening-range breakouts so far today")
     common(p, 5.0, 0)
     p.add_argument("--or-minutes", type=int, default=15)
