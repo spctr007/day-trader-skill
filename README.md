@@ -52,7 +52,10 @@ Project-local instead of global: copy the same folders into your repo's
 top of a chat and it runs as a mode. You lose the Python tools, but the method
 works.
 
-The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
+The tools need Python 3.8 or newer. Nothing to pip install: they use only the
+standard library. The repo is set up for [uv](https://docs.astral.sh/uv/):
+`uv run` uses the Python pinned in `.python-version` (3.12) and makes `.venv`
+the first time. Plain `python3` works too. The SEC tools
 (news filings, the analyst) ask you to identify yourself: put your name and
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
@@ -126,25 +129,25 @@ All standard-library Python. The data tools read public endpoints and are
 polite about it.
 
 ```bash
-python3 trader-scanner/scan.py universe                                # ~5,900 US stocks, Nasdaq Trader
-python3 trader-scanner/scan.py daily                                   # pre-market setups, whole universe
-python3 trader-scanner/scan.py orb --at 10:15                          # opening-range breakouts so far
-python3 trader-news/news.py --tickers TSLA --hours 12                  # headlines, 8-Ks, today's move
-python3 trader-entry/entry.py check TSLA --setup orb                   # waiting / triggered / expired
-python3 trader-entry/entry.py watch TSLA --every 30                    # bar by bar until it triggers
-python3 trader-exit/exit.py plan --stop or-mid --target 1R --write     # -> trader/plan.json
-python3 trader-timemachine/timemachine.py run --write                  # 10,000 replays + the history
-python3 trader-budget/size.py --write                                  # -> trader/orders.json
-python3 trader-risk/check.py                                           # PASS / BLOCK per order
-python3 trader-broker/ticket.py show                                   # the tickets, READY or not
-python3 trader-alerts/alerts.py add --from-plan                        # stop, target, flat by close
-python3 trader-alerts/alerts.py check                                  # rings what hit, once
-python3 trader-analyst/facts.py TSLA                                   # quarters, growth, EPS
-python3 trader-pelosi/ptr.py index --member pelosi                     # her PTRs this year
+uv run trader-scanner/scan.py universe                                 # ~5,900 US stocks, Nasdaq Trader
+uv run trader-scanner/scan.py daily                                    # pre-market setups, whole universe
+uv run trader-scanner/scan.py orb --at 10:15                           # opening-range breakouts so far
+uv run trader-news/news.py --tickers TSLA --hours 12                   # headlines, 8-Ks, today's move
+uv run trader-entry/entry.py check TSLA --setup orb                    # waiting / triggered / expired
+uv run trader-entry/entry.py watch TSLA --every 30                     # bar by bar until it triggers
+uv run trader-exit/exit.py plan --stop or-mid --target 1R --write      # -> trader/plan.json
+uv run trader-timemachine/timemachine.py run --write                   # 10,000 replays + the history
+uv run trader-budget/size.py --write                                   # -> trader/orders.json
+uv run trader-risk/check.py                                            # PASS / BLOCK per order
+uv run trader-broker/ticket.py show                                    # the tickets, READY or not
+uv run trader-alerts/alerts.py add --from-plan                         # stop, target, flat by close
+uv run trader-alerts/alerts.py check                                   # rings what hit, once
+uv run trader-analyst/facts.py TSLA                                    # quarters, growth, EPS
+uv run trader-pelosi/ptr.py index --member pelosi                      # her PTRs this year
 ```
 
 ```bash
-python3 -m unittest discover -s tests -v
+uv run python -m unittest discover -s tests -v
 ```
 
 The tests run offline, on fixtures cut from real data: TSLA's 5-minute bars
@@ -158,9 +161,9 @@ The scanner also scans the Philippine Stock Exchange, with free daily bars
 from PSE Edge (edge.pse.com.ph). Yahoo has no PSE data.
 
 ```bash
-python3 trader-scanner/scan.py universe --market ph                    # the PH list, about weekly (3 s)
-python3 trader-scanner/scan.py daily --market ph                       # setups -> trader/watchlist-ph.json (~3 min)
-python3 trader-scanner/scan.py daily --market ph --symbols JFC,SM,BDO  # a few names only
+uv run trader-scanner/scan.py universe --market ph                     # the PH list, about weekly (3 s)
+uv run trader-scanner/scan.py daily --market ph                        # setups -> trader/watchlist-ph.json (~3 min)
+uv run trader-scanner/scan.py daily --market ph --symbols JFC,SM,BDO   # a few names only
 ```
 
 The PH list is `trader/universe-ph.txt`: every listed company (284 on
@@ -241,6 +244,7 @@ trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-pelosi/      SKILL.md, ptr.py
 tests/              unittest suite + offline fixtures
+pyproject.toml      uv project (no dependencies), with uv.lock and .python-version
 ```
 
 MIT. Made by [Jake Schincariol](https://opusjake.ai).

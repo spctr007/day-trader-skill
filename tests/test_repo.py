@@ -39,8 +39,10 @@ class Repo(unittest.TestCase):
         self.assertEqual(found, sorted(SKILLS))
 
     def test_root_matches_the_reel(self):
-        root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+        local = (".git", ".venv", ".claude", "trader", "__pycache__")  # never committed: see .gitignore
+        root = sorted(d for d in os.listdir(ROOT) if d not in local)
+        self.assertEqual(root, sorted([".claude-plugin", ".gitignore", ".python-version", "LICENSE", "README.md",
+                                       "pyproject.toml", "tests", "uv.lock"] + SKILLS))
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:

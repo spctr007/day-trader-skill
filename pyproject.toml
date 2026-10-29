@@ -1,0 +1,11 @@
+[project]
+name = "day-trader-skill"
+version = "2.0.0"
+description = "11 Claude skills for day trading. Standard-library Python tools."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.8"
+dependencies = []
+
+[tool.uv]
+package = false
